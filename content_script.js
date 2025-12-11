@@ -1,168 +1,201 @@
-// content_script.js
-// Listens for messages from popup and attempts to insert content into the compose box
+/******************************
+ *  INSERT EMAIL TEXT HANDLER
+ ******************************/
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "insert_email_text") {
     const text = msg.text || "";
     const success = insertTextIntoCompose(text);
+
     sendResponse({
       status: success
         ? "Inserted into compose area."
         : "Could not find compose area; tried to paste into focused editable element.",
     });
   }
+
+  if (msg.action === "get_incoming_email") {
+    sendResponse({ emailText: getIncomingEmailText() });
+  }
 });
 
-// Tries a few heuristics: Gmail, Outlook.com, Yahoo Mail, fallback to activeElement
+/******************************
+ *  INSERTION LOGIC
+ ******************************/
 function insertTextIntoCompose(text) {
-  // 1) Gmail: contenteditable message body
+  // Try all email providers
+  return (
+    tryGmail(text) ||
+    tryOutlook(text) ||
+    tryYahoo(text) ||
+    tryIframeEditors(text) ||
+    tryFocusedEditable(text) ||
+    tryAnyEditable(text)
+  );
+}
+
+/*************
+ *  GMAIL
+ *************/
+function tryGmail(text) {
   try {
-    // Gmail can use div[aria-label="Message Body"] or div[role="textbox"][aria-label="Message Body"]
-    let el = document.querySelector('div[aria-label="Message Body"]');
-    if (!el) {
-      el = document.querySelector('div[role="textbox"][aria-label*="Message"]');
-    }
+    // Gmail compose body selectors
+    let el =
+      document.querySelector('div[aria-label="Message Body"]') ||
+      document.querySelector('div[role="textbox"][aria-label*="Message"]') ||
+      document.querySelector(".Am.Al.editable");
+
     if (el && isEditable(el)) {
-      pasteTextToElement(el, text);
+      pasteText(el, text);
       return true;
     }
   } catch (e) {
     console.warn("Gmail insert error", e);
   }
+  return false;
+}
 
-  // 2) Outlook Web (classic / new)
+/*************
+ *  OUTLOOK
+ *************/
+function tryOutlook(text) {
   try {
-    // Outlook uses div[aria-label="Message body"] or iframe-based editors
     let el =
       document.querySelector('div[aria-label*="Message body"]') ||
       document.querySelector('[contenteditable="true"][aria-label*="Message"]');
-    if (el && isEditable(el)) {
-      pasteTextToElement(el, text);
-      return true;
-    }
 
-    // Outlook sometimes uses an iframe
-    const iframes = Array.from(document.querySelectorAll("iframe"));
-    for (const iframe of iframes) {
-      try {
-        const doc = iframe.contentDocument || iframe.contentWindow.document;
-        const body = doc.body;
-        if (body && isEditable(body)) {
-          pasteTextToElement(body, text, iframe.contentWindow);
-          return true;
-        }
-      } catch (e) {
-        /* cross-origin may block */
-      }
+    if (el && isEditable(el)) {
+      pasteText(el, text);
+      return true;
     }
   } catch (e) {
     console.warn("Outlook insert error", e);
   }
+  return false;
+}
 
-  // 3) Yahoo Mail
+/*************
+ *  YAHOO MAIL
+ *************/
+function tryYahoo(text) {
   try {
     let el =
       document.querySelector('[aria-label="Message body"]') ||
       document.querySelector('[contenteditable="true"].msg-body');
+
     if (el && isEditable(el)) {
-      pasteTextToElement(el, text);
+      pasteText(el, text);
       return true;
     }
   } catch (e) {
     console.warn("Yahoo insert error", e);
   }
-
-  // 4) fallback: insert into focused element if it's editable
-  const active = document.activeElement;
-  if (
-    active &&
-    (active.tagName === "TEXTAREA" ||
-      active.tagName === "INPUT" ||
-      isEditable(active))
-  ) {
-    pasteTextToElement(active, text);
-    return true;
-  }
-
-  // 5) As a last resort, try to find any contenteditable in the page
-  const anyEditable = document.querySelector('[contenteditable="true"]');
-  if (anyEditable) {
-    pasteTextToElement(anyEditable, text);
-    return true;
-  }
-
   return false;
 }
 
+/*******************
+ *  ANY IFRAMES
+ *******************/
+function tryIframeEditors(text) {
+  const iframes = Array.from(document.querySelectorAll("iframe"));
+
+  for (const iframe of iframes) {
+    try {
+      const doc = iframe.contentDocument || iframe.contentWindow?.document;
+      if (!doc) continue;
+
+      const body = doc.body;
+      if (body && isEditable(body)) {
+        pasteText(body, text);
+        return true;
+      }
+    } catch (e) {
+      /* cross-origin error ignored */
+    }
+  }
+  return false;
+}
+
+/****************************
+ *  FALLBACKS
+ ****************************/
+function tryFocusedEditable(text) {
+  const el = document.activeElement;
+  if (el && isEditable(el)) {
+    pasteText(el, text);
+    return true;
+  }
+  return false;
+}
+
+function tryAnyEditable(text) {
+  const el = document.querySelector("[contenteditable='true']");
+  if (el) {
+    pasteText(el, text);
+    return true;
+  }
+  return false;
+}
+
+/******************************
+ *  EDITABLE CHECK + INSERTION
+ ******************************/
 function isEditable(el) {
-  if (!el) return false;
   return (
-    el.isContentEditable ||
-    el.tagName === "TEXTAREA" ||
-    (el.tagName === "INPUT" &&
-      (el.type === "text" || el.type === "search" || el.type === "email"))
+    el &&
+    (el.isContentEditable ||
+      el.tagName === "TEXTAREA" ||
+      (el.tagName === "INPUT" && ["text", "search", "email"].includes(el.type)))
   );
 }
 
-function pasteTextToElement(el, text, win = window) {
-  // If it's a textarea or input, set value and dispatch events
+function pasteText(el, text) {
+  el.focus();
+
+  // For input/textarea
   if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
-    el.focus();
     const start = el.selectionStart ?? el.value.length;
     const end = el.selectionEnd ?? el.value.length;
     el.setRangeText(text, start, end, "end");
     el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
     return;
   }
-  // If contenteditable, try to insert at caret or append
-  el.focus();
-  // Use document.execCommand fallback for contenteditable insertion
+
+  // For contenteditable
   try {
-    const doc = el.ownerDocument || document;
+    const doc = el.ownerDocument;
     const sel = doc.getSelection();
+
     if (sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
       const range = sel.getRangeAt(0);
       range.deleteContents();
-      const nodes = text.split("\n").map((line, i) => {
-        const node = doc.createTextNode(line);
-        const frag = doc.createDocumentFragment();
-        frag.appendChild(node);
-        if (i < text.split("\n").length - 1) {
-          frag.appendChild(doc.createElement("br"));
-        }
-        return frag;
-      });
+
       const frag = doc.createDocumentFragment();
       text.split("\n").forEach((line, i) => {
         frag.appendChild(doc.createTextNode(line));
-        if (i < text.split("\n").length - 1)
+        if (i < text.split("\n").length - 1) {
           frag.appendChild(doc.createElement("br"));
+        }
       });
+
       range.insertNode(frag);
-      // move cursor after inserted content
       range.collapse(false);
       sel.removeAllRanges();
       sel.addRange(range);
-      // Dispatch input events so webapps detect change
+
       el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
     } else {
-      // fallback append
       el.innerHTML +=
         "<div>" + escapeHtml(text).replace(/\n/g, "<br>") + "</div>";
       el.dispatchEvent(new Event("input", { bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
     }
   } catch (e) {
-    // final fallback: set innerText
     el.innerText += "\n" + text;
     el.dispatchEvent(new Event("input", { bubbles: true }));
-    el.dispatchEvent(new Event("change", { bubbles: true }));
   }
 }
 
 function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, function (c) {
+  return s.replace(/[&<>"']/g, (c) => {
     return {
       "&": "&amp;",
       "<": "&lt;",
@@ -171,4 +204,30 @@ function escapeHtml(s) {
       "'": "&#39;",
     }[c];
   });
+}
+
+/******************************
+ *  EXTRACT INCOMING EMAIL TEXT
+ ******************************/
+function getIncomingEmailText() {
+  // Gmail conversation body
+  const gmailThread =
+    document.querySelector(".a3s") ||
+    document.querySelector(".gmail_quote") ||
+    document.querySelector("div.a3s.aiL");
+  if (gmailThread) return gmailThread.innerText.trim();
+
+  // Outlook thread
+  const outlookThread =
+    document.querySelector('[aria-label="Message body"]') ||
+    document.querySelector(".ms-MessageBody-content");
+  if (outlookThread) return outlookThread.innerText.trim();
+
+  // Yahoo
+  const yahooThread =
+    document.querySelector(".thread-body") ||
+    document.querySelector(".mail-message-content");
+  if (yahooThread) return yahooThread.innerText.trim();
+
+  return "";
 }

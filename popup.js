@@ -6,7 +6,7 @@ const promptEl = document.getElementById("prompt");
 const resultEl = document.getElementById("result");
 const statusEl = document.getElementById("status");
 
-// Simple UI helpers
+// UI helpers
 function setStatus(msg) {
   statusEl.textContent = msg;
 }
@@ -14,32 +14,32 @@ function clearStatus() {
   statusEl.textContent = "";
 }
 
+// AI Wrapper
 async function generateText(prompt) {
   setStatus("Generating...");
   try {
-    const OPENAI_API_KEY = "";
+    const OPENAI_API_KEY = ""; // ← leave empty if using demo mode
+
     if (!OPENAI_API_KEY) {
       setStatus("Using built-in demo text (no API key).");
-      return `Hello,\n\nThanks for your message. I enjoyed our discussion last week and wanted to follow up about next steps. Please let me know a good time to connect.\n\nBest regards,\n[Your Name]`;
+      return `Hello,\n\nThanks for your email. I have reviewed it and will get back to you shortly.\n\nBest regards,\n[Your Name]`;
     }
 
-    // Example OpenAI call (not executed unless you insert a key)
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini", // put desired model
+        model: "gpt-4o-mini",
         messages: [{ role: "user", content: prompt }],
         max_tokens: 400,
       }),
     });
-    const json = await resp.json();
-    // adapt to returned structure
-    const text = json?.choices?.[0]?.message?.content ?? "";
-    return text;
+
+    const json = await response.json();
+    return json?.choices?.[0]?.message?.content || "";
   } catch (err) {
     console.error(err);
     throw err;
@@ -48,44 +48,112 @@ async function generateText(prompt) {
   }
 }
 
+// -----------------------------
+// GENERATE BUTTON (Main Feature)
+// -----------------------------
 generateBtn.addEventListener("click", async () => {
-  const prompt = promptEl.value.trim();
-  if (!prompt) {
-    setStatus("Please write a prompt for the AI.");
+  generateBtn.disabled = true;
+  setStatus("Reading email...");
+
+  // Get incoming email from content_script
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  let incomingEmail = "";
+
+  try {
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      action: "get_incoming_email",
+    });
+    incomingEmail = response?.emailText || "";
+  } catch {
+    incomingEmail = ""; // allow manual mode fallback
+  }
+
+  // User override prompt
+  const userPrompt = promptEl.value.trim();
+  let finalPrompt = "";
+
+  // ---------------------
+  // 1. AUTO REPLY MODE
+  // ---------------------
+  if (incomingEmail && !userPrompt) {
+    finalPrompt = `
+You are an AI email assistant.
+Read the incoming email below and automatically understand its purpose:
+(meeting, leave request, complaint, follow-up, purchase, issue, support, etc.)
+
+Do NOT ask the user any questions.
+Do NOT request clarification.
+Write a complete professional reply that matches the intent.
+
+Incoming Email:
+${incomingEmail}
+    `;
+  }
+
+  // -----------------------------------
+  // 2. AUTO + USER CORRECTION MODE
+  // -----------------------------------
+  else if (incomingEmail && userPrompt) {
+    finalPrompt = `
+Incoming Email:
+${incomingEmail}
+
+User Instruction:
+${userPrompt}
+
+Write a corrected reply based on the instruction.
+    `;
+  }
+
+  // ---------------------
+  // 3. MANUAL MODE
+  // ---------------------
+  else if (!incomingEmail && userPrompt) {
+    finalPrompt = userPrompt;
+  }
+
+  if (!finalPrompt.trim()) {
+    setStatus("No input detected. Type a prompt or open an email.");
+    generateBtn.disabled = false;
     return;
   }
+
+  // Generate the AI response
   try {
-    generateBtn.disabled = true;
-    const text = await generateText(prompt);
-    resultEl.value = text;
-  } catch (e) {
-    setStatus("Failed to generate. See console.");
-  } finally {
-    generateBtn.disabled = false;
+    setStatus("Generating...");
+    const aiText = await generateText(finalPrompt);
+    resultEl.value = aiText;
+    setStatus("Done!");
+  } catch (err) {
+    setStatus("Failed to generate.");
   }
+
+  generateBtn.disabled = false;
 });
 
+// -----------------------------
+// INSERT INTO EMAIL
+// -----------------------------
 okBtn.addEventListener("click", async () => {
   const text = resultEl.value;
   if (!text) {
     setStatus("Nothing to insert — generate content first.");
     return;
   }
-  // Send message to the active tab to insert the text
+
   setStatus("Inserting into email...");
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) {
     setStatus("No active tab found.");
     return;
   }
+
   chrome.tabs.sendMessage(
     tab.id,
     { action: "insert_email_text", text },
     (resp) => {
       if (chrome.runtime.lastError) {
-        setStatus(
-          "Unable to send message to tab. Make sure you are on a supported email compose page."
-        );
+        setStatus("Unable to insert into email.");
       } else {
         setStatus(resp?.status || "Inserted.");
       }
@@ -93,6 +161,7 @@ okBtn.addEventListener("click", async () => {
   );
 });
 
-closeBtn.addEventListener("click", () => {
-  window.close();
-});
+// -----------------------------
+// CLOSE POPUP
+// -----------------------------
+closeBtn.addEventListener("click", () => window.close());
