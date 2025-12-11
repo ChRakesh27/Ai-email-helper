@@ -141,21 +141,17 @@ okBtn.addEventListener("click", async () => {
     return;
   }
 
-  setStatus("Inserting into email...");
+  setStatus("Opening reply...");
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) {
-    setStatus("No active tab found.");
-    return;
-  }
 
   chrome.tabs.sendMessage(
     tab.id,
-    { action: "insert_email_text", text },
+    { action: "open_reply_and_insert", text },
     (resp) => {
       if (chrome.runtime.lastError) {
-        setStatus("Unable to insert into email.");
+        setStatus("Cannot communicate with tab. Open an email view.");
       } else {
-        setStatus(resp?.status || "Inserted.");
+        setStatus(resp?.status || "Reply opened and text inserted.");
       }
     }
   );
